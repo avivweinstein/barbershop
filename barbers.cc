@@ -89,8 +89,7 @@ public:
   // Return random customer arrival.
   int customer_arrival_time();
 
-  queue<Barber*>   barberQueue;
-  queue<Customer*> customerQueue;
+
 
 private:
 
@@ -119,6 +118,13 @@ private:
   
   //length of the simulation/run
   int simulationDuration;
+
+  pthread_mutex_t *shopMutex;       //Mutex for shop operations.
+
+  queue<Barber*>   barberQueue;
+  queue<Customer*> customerQueue;
+
+  //Include a shop mutex
 
 };
 
@@ -150,8 +156,9 @@ private:
 
   pthread_mutex_t *barberMutex;       //Mutex for barber operations.
   pthread_cond_t *barberCondition;    //Condition (signal) for barber operations
-  Customer* assignedCustomer;                //Customer* that points to customer this barber is working on
+
   int barberState = 0;                       //to determine the state that a barber is in
+  Customer* assignedCustomer;                //Customer* that points to customer this barber is working on
 
 };
 
@@ -175,13 +182,13 @@ public:
   void payment_accepted();
 
   const int id;
+  Barber* assignedBarber;                     //Barber* that points to the barber working with this customer object.
 
 
 private:
   Shop* shop;
   pthread_mutex_t *customerMutex;      //mutex for cusotmer operations
   pthread_cond_t *customerCondition;   //condition (signal) for customer operations
-  Barber* assignedBarber;                     //Barber* that points to the barber working with this customer object.
   int customerState = 0;                      //internal variable to determine the state of the customer
 };
 
@@ -218,6 +225,9 @@ Shop::Shop(int n_barbers, unsigned int waiting_chairs, int average_service_time,
   averageCustomerArrival = average_customer_arrival;
   simulationDuration = duration;
 
+  shopMutex = (pthread_mutex_t *) malloc(sizeof(pthread_mutex_t));
+  *shopMutex = PTHREAD_MUTEX_INITIALIZER;
+
   int rc = clock_gettime(CLOCK_REALTIME, &time_limit);
   if (rc < 0) {
     perror("reading realtime clock");
@@ -242,7 +252,8 @@ Shop::Shop(int n_barbers, unsigned int waiting_chairs, int average_service_time,
       else{
         cout << "Barber " << newBarber->id << " arrives for work" << endl;
         barber_threads.push_back(barberThread);
-        barberQueue.push(newBarber);
+        //barberQueue.push(newBarber);
+        //cout << "shop constructor barberQueue size: " << barberQueue.size() << endl;
       }
   }
 }
@@ -288,8 +299,10 @@ void Shop::run(){
           pthread_detach(*customerThread);
       }
   }
+  
 
   cout << "the shop closes" << endl;
+  shopOpen = false; 
 
   for (auto thread: barber_threads) {
     pthread_join(*thread, nullptr);
@@ -308,9 +321,8 @@ void Shop::run(){
 //---------------------------------------------Shop::arrives-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
 Shop::BarberOrWait Shop::arrives(Customer* customer) {
-  
+  Lock shopLock(shopMutex);                 //Lock teh shop mutex
   Barber* tempBarber;                       //Makes returning a struct a little cleaner
-
   
   if(barberQueue.empty() == false){         //If we break in here, there is a barber available 
                                             //as he is sleeping
@@ -329,7 +341,6 @@ Shop::BarberOrWait Shop::arrives(Customer* customer) {
   //If there is no available barber, check the waiting chairs
   else if(barberQueue.empty() == true && customerQueue.size() < waitingChairs){
     
-
     customerQueue.push(customer);           //Add the customer to waitingQueue
 
     customers_waited++;                    //Increment the fact that we had a customer wait.
@@ -352,16 +363,21 @@ Shop::BarberOrWait Shop::arrives(Customer* customer) {
 //---------------------------------------------Shop::next_customer-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
 Customer* Shop::next_customer(Barber* barber) {
+  Lock shopLock(shopMutex);
   Customer* returnCustomer;
   
+//We are reading/writing shared queues. Need to lock shop mutex.
+
   if(customerQueue.empty() == false){       //If the customerQueue IS NOT empty. Meaning there are customers
     returnCustomer = customerQueue.front(); //return the front of the queue
     customerQueue.pop();                    //Remove the customer from the customerQueue
+//    barberQueue.pop();                      //Remove the barber from the queue
     return returnCustomer;
   }
 
   else{                                         //If the customerQueue IS empty, barber takes a nap.
     cout << "Barber " << barber->id << " takes a nap" << endl;
+    this->barberQueue.push(barber);             //Return the barber to the barberQueue
     return nullptr;
   }
 }
@@ -417,72 +433,83 @@ Barber::Barber(Shop* shop, int id):id(id){
 //------------------------------------------------------------------------------------------------------------------------
 //---------------------------------------------Barber::run-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
-void Barber::run() {                                    
-  while (shopOpen){           //Barbers work until the termination of the shop.
+void Barber::run() {                                   
+  while (true){           //Barbers work until the termination of the shop.
 
-    //DO I NEED A LOCK AROUND THIS?
-    this->assignedCustomer = shop->next_customer(this);
-    //We either return nullptr or a Customer obj. If we return a customer, that means that take a customer
-    //from the customerQueue to service. If the customerQueue is empty, then we return nullptr.
+  this->barberState = 0;      //Resetting the state variable for a barber
 
-    if(this->assignedCustomer != nullptr){      //If we get a Cusotmer* as a return
-      { //Lock waiting for state 1, waiting on the awaken() function
-      Lock barberLock(barberMutex);
-        while(this->barberState != 1){
-          pthread_cond_wait(this->barberCondition,barberMutex); //Here we are waiting on awaken to get us out of this state.
-        }
-      } //Unlock State 1
+  Customer *myCustomer;
 
+    //{ //We dont need a lock here, as the next_customer function manipualtes data of the shop.
+    myCustomer = shop->next_customer(this);
+
+    //here is where you need to wait for myCustomer to become not nullptr
+
+    if(myCustomer == nullptr){ //If we dont have a customer. we wait on being awoken.
+      
+      Lock lock (barberMutex);
+      while(barberState != 1 && shopOpen/*&& shop is not closed*/){
+          pthread_cond_wait(barberCondition, barberMutex);
+      }
+      //By this point, the cusotmer has called awaken.
+      //We only get barberState = 1 when awaken is called in the customer thread
+
+      myCustomer = this->assignedCustomer;
+      cout << "Customer " << myCustomer->id << " wakes Barber " << this->id << "." << endl;
+    
+    } else{
+      //this means you have a customer in the shop.
+      //the shop has told you who your customer is.
+      //so there is a customer in the waiting room chair
+      //this means that shop::bext_customer returned a valid customer pointer.
+
+      myCustomer->next_customer(this); //This changes customer state to 1
+      cout << "Barber " << this->id << " calls Customer "<< myCustomer->id << "." <<endl;
+    }
+  
       //If we get here, the barber is now awake, but the customer needs to sit down.
 
-      { //Lock waiting for state 2, waiting on the customer_sits() function
+      { //Lock waiting for barberState 2, waiting on the customer_sits() function
         Lock barberLock(barberMutex);
-        while(this->barberState != 2){
+        while(this->barberState != 2){      //customer_sits changes barberState to 2
           pthread_cond_wait(this->barberCondition, barberMutex);
         }
       }//Unlock from State 2
-
+      
       //If we get here, the barber is awake and a customer has sat in their chair.
       //That means that we now need to sleep for our service time.
       usleep(this->shop->service_time());
-      assignedCustomer->finished();
 
-      {//Lock for state 3, waiting on the payment() function
+      myCustomer->finished(); //this changes customerState to 2
+      cout << "Barber " << this->id << " finishes Customer " << myCustomer->id << "'s haircut." << endl;
+      
+      {//Lock waiting for state 3, waiting on payment() function
         Lock barberLock(barberMutex);
-        while(barberState != 3){
-          pthread_cond_wait(this->barberCondition,barberMutex);
-        }
-      }//Unlock from state 3
-        assignedCustomer->payment_accepted();
-
-      {//Lock state 4, which is us calling next_customer, for the Customer class. Customer::next_customer
-      //THIS MEANS WE WANT TO TELL A CUSTOMER THEY ARE NEXT.
-        Lock barberLock(barberMutex);
-        while(barberState != 4){
+        while(this->barberState != 3){
           pthread_cond_wait(barberCondition, barberMutex);
         }
-      }
-    }
+      } //Unlock from State 3
 
-    else if(this->assignedCustomer == nullptr){               //this means that the customerQueue and waitingQueue are empty.
-      Lock barberLock(barberMutex);
-      while(this->barberState != 1){                          //we should wait on the awaken signal.
-        pthread_cond_wait(this->barberCondition,barberMutex);
-        //Should I use the reserved word "continue" here?
-      }
-    }
+      myCustomer->payment_accepted();
+      cout << "Barber " << this->id << " accepts payment from Customer " << myCustomer->id << "." << endl;
+       //this changes customerState to 3.
+      //WHAT DO I DO HERE NOW?
+      //What do I call to ask for my next customer?
   }
 
+  //Here we have broken out of the while loop
+  //How do i work in closing_time?
 }
 
+
+  
 
 //------------------------------------------------------------------------------------------------------------------------
 //---------------------------------------------Barber::closing_time-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
-void Barber::closing_time() {
-  Lock lock(barberMutex);
-  shopOpen = false;    //Barber stops looping.
-  
+void Barber::closing_time(){
+  //Not at all clear on where to use this fucntion or what to keep inside it.
+
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -490,10 +517,11 @@ void Barber::closing_time() {
 //------------------------------------------------------------------------------------------------------------------------
 void Barber::awaken(Customer* customer) {
   Lock barberLock(barberMutex);
-  cout << "Customer " << customer->id << " wakes barber " << this->id << "." << endl;
+  //cout << "Customer " << customer->id << " wakes Barber " << this->id << "." << endl;
+  //no print statements in functions, only in run functions
+  assignedCustomer = customer;
   barberState = 1;
   pthread_cond_signal(this->barberCondition);
-
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -501,7 +529,7 @@ void Barber::awaken(Customer* customer) {
 //------------------------------------------------------------------------------------------------------------------------
 void Barber::customer_sits() {
   Lock lock(barberMutex);
-  cout << "Customer " << this->assignedCustomer->id << " sits in barber" << this->id << "'s chair." << endl;
+  //cout << "Customer " << this->assignedCustomer->id << " sits in Barber" << this->id << "'s chair." << endl;
   barberState = 2;
   pthread_cond_signal(this->barberCondition);
 
@@ -511,8 +539,9 @@ void Barber::customer_sits() {
 //---------------------------------------------Barber::payment-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
 void Barber::payment() {
-  Lock lock(barberMutex);
-  cout << "Customer " << this->assignedCustomer->id << " gets up and proffers payment to barber " << this->id << "." << endl;
+  Lock barberLock(barberMutex);
+  //cout << "Customer " << this->assignedCustomer->id << " gets up and proffers payment to barber " << this->id << "." << endl;
+  //cout << "Do we make it here?" << endl;
   barberState = 3;
   pthread_cond_signal(this->barberCondition);
 }
@@ -544,53 +573,87 @@ Customer::~Customer() {
 //------------------------------------------------------------------------------------------------------------------------
 void Customer::run() {
   Shop::BarberOrWait barberOrWaitResponse; //stores the BarberOrWait object that is returned by arrives.
+  
+  Barber *myBarber;
 
+  //The shop lock mutex makes this operation safe without its own lock.
   barberOrWaitResponse = this->shop->arrives(this);
-  assignedBarber = barberOrWaitResponse.barber;
 
   if(barberOrWaitResponse.barber != nullptr){    //There is a sleeping barber, so we call the awaken function.
-      assignedBarber->awaken(this);
-      assignedBarber->customer_sits();
-
-      {
-        Lock cusotmerLock(customerMutex);
-        while(customerState != 1){
-          pthread_cond_wait(customerCondition,customerMutex);
-        }
-      }
+      myBarber = barberOrWaitResponse.barber;
       
-      //Barber has finished servicing the customer
-      //It is now time for the customer to pay
+      myBarber->awaken(this);
 
+
+  }else if(barberOrWaitResponse.chair_available){
+    {//wait for the barber to call customer::next_customer
+      Lock lock(customerMutex);
+      while(customerState != 1){ //next_customer sets customerState to 1
+        pthread_cond_wait(customerCondition, customerMutex);
+      }
+      //Customer::next_customer is called here
+
+      //want to set local barber to customer obj barber
+      myBarber = this->assignedBarber;
+    }
+  }else{ //If we land here, then there are no barbers and no chairs.
+    //leave
+    cout << "Customer " << this->id << " leaves without getting a haircut." << endl;
+    return;
+  }
+    myBarber->customer_sits(); //this chnages barberState to 2.
+    cout << "Customer " << this->id << " sits in Barber " << myBarber->id << "'s chair." << endl;
+     
       {
-        Lock customerLock(customerMutex);
-        while(customerState != 2){
+        Lock customerLock(customerMutex); 
+        while(customerState != 2){ //customerState is set to 2 in the finished function
           pthread_cond_wait(customerCondition, customerMutex);
         }
       }
 
-      assignedBarber->payment();
+      //Barber has finished servicing the customer
+      //It is now time for the customer to pay
 
-      //After this, the customer should leave the shop. SO they would break out of the Customer::run function
+      myBarber->payment();
+      cout << "Customer " << this->id << " gets up and proffers payment to barber " << myBarber->id << "." << endl;
+
+      {
+        Lock lock(customerMutex);
+        while(customerState != 3){ //waiting on payment_accepted function.
+          pthread_cond_wait(customerCondition, customerMutex);
+        }
+      }
+
+      //at this point, the customer has gotten their haircut and paid.
+      cout << "Customer " << this->id << " leaves statisfied." << endl;
       return;
   }
-  else if(barberOrWaitResponse.barber == nullptr && barberOrWaitResponse.chair_available == true){
 
-  }
 
-  else {                                          //All barbers are busy and no seats. We just return
-    cout << "Customer " << this->id << " leaves without getting a haircut." << endl;
-    return;
-  }
-}
+
 
 //------------------------------------------------------------------------------------------------------------------------
 //---------------------------------------------Customer::next_customer-------------------------------------------------------
 //------------------------------------------------------------------------------------------------------------------------
 void Customer::next_customer(Barber* barber) {
-  Lock lock (customerMutex);
-  customerState = 999;
-  cout << "Barber " << this->assignedBarber->id << " calls customer "<< this->id << "." <<endl;
+  Lock lock(customerMutex);
+  this->assignedBarber = barber;
+  customerState = 1;
+  pthread_cond_signal(this->customerCondition);
+  
+  /*if (this->shop->customerQueue.empty() == true){ //If there are no more customers in the cusotmerQueue
+    cout << "Customer " << this->id << " leaves statisfied." << endl;
+    customerState = 3;  //Have this state terminate the customer.
+    return;
+  }
+
+  else{
+    int nextCustomerID = this->shop->customerQueue.front()->id;
+    cout << "Barber " << this->assignedBarber->id << " calls Customer "<< nextCustomerID << "." <<endl;
+    //Here I am just printing out the next customer. In the other next_customer function, I actually assign barber to customer.
+    return;
+  }*/
+
 }
 
 
@@ -599,8 +662,8 @@ void Customer::next_customer(Barber* barber) {
 //------------------------------------------------------------------------------------------------------------------------
 void Customer::finished() {
   Lock lock (customerMutex);
-  cout << "Barber " << this->assignedBarber->id << " finishes customer " << this->id << "'s haircut." << endl;
-  customerState = 1;
+  //cout << "Barber " << this->assignedBarber->id << " finishes Customer " << this->id << "'s haircut." << endl;
+  customerState = 2;
   pthread_cond_signal(this->customerCondition);
 }
 
@@ -609,8 +672,7 @@ void Customer::finished() {
 //------------------------------------------------------------------------------------------------------------------------
 void Customer::payment_accepted() {
   Lock lock(customerMutex);
-  cout << "Barber " << this->assignedBarber->id << " accepts payment from customer " << this->id << "." << endl;
-  customerState = 2;
+  customerState = 3;
   pthread_cond_signal(this->customerCondition);
 }
 
