@@ -1,0 +1,56 @@
+Aviv Weinstein
+Assignment 2: Sleeping Barbers
+Professor Bernstein
+4/30/21
+
+Initially, with the default conditions given in the RUN script for NBARBERS,
+SERVICE_TIME, AND CUSTOMER_ARRIVALS, I couldn’t seem to get it so that any
+customers needed to wait (the default values for those variables were 3,
+1200, and 400, respectively). However, when I increased the SERVICE_TIME 
+of each run, then I would start seeing customers being turned away. Any 
+SERVICE_TIME about the default 1200, and I would see customers needing to 
+wait and/or being turned away. It took a while, but I later debugged 
+this to being a bug in my customer_arrival_time() and service_time() 
+functions. I wasn’t properly generating random numbers, and therefore,
+the service time was always the same and quick enough, so that at 
+least one of the barbers finished their work on a customer before 
+any other customers could arrive. This was an annoying bug, as I thought
+ those two functions were the “easiest” to write. How wrong I was.
+With the above said, based on the runs of my code, using the following 
+run time options:
+
+  NBARBERS = 3
+  NCHAIRS = 3
+  SERVICE_TIME = 1200
+  SERVICE_DEVIATION = 200
+  CUSTOMER_ARRIVALS = 400
+  DURATION_SECONDS = 300
+  
+  
+  
+The number of chairs needed in the barber shop to ensure that no customers 
+turned away is approximately 7 chairs. When I ran tests using 8 chairs, 
+there were consistently no customers turned away. At 7 chairs, there were 
+a few (between 2-4) customers that were turned away on average.
+
+
+
+As far as the rest of the assignment, it took a while (and I mean a WHILE)
+for me to fully wrap my head around the signaling that this assignment was 
+trying to teach us. But once I did understand the signaling/message passing 
+between the two actors (barbers and customers), writing the ::run functions, 
+for both the Barber and Customer classes, was fairly straight forward. 
+Customer calls a function that the barber is waiting on. Then the barber 
+calls a function that the customer is waiting on. So on and so forth.
+
+
+
+Something that I did not completely figure out how to accomplish was how 
+to use the closing_time function. I wasn’t clear on how, from the shop’s 
+run function, I would be able to easily signal the barbers that it was time 
+to close the shop. I instead created a global Boolean variable that would change 
+from true to false when the shop was set to close. I used this variable to signal to the 
+barbers when it was time for them to close shop.
+
+
+
